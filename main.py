@@ -285,26 +285,20 @@ print(json.dumps(result))
             return output_str.strip()
             
         return str(response)
+
     except Exception as e:
-        logger.warning(f"Code Interpreter failed, using local fallback: {e}")
+        logger.warning(f"Code Interpreter failed, using local tier-only fallback: {e}")
         tier_rates = {"Silver": 0.00, "Gold": 0.10, "Platinum": 0.15}
-        max_pts = int((order_total * 0.50) * 100)
-        pts_redeemed = (min(loyalty_points, max_pts) // 500) * 500
-        pts_discount = pts_redeemed / 100.0
-        subtotal = max(0.0, order_total - pts_discount)
         tier_rate = tier_rates.get(tier, 0.0)
-        tier_disc = subtotal * tier_rate
-        final = max(0.0, subtotal - tier_disc)
+        tier_disc = order_total * tier_rate
+        final = max(0.0, order_total - tier_disc)
+        
+        # Tier-only fallback response as required by mentor
         return json.dumps({
             "order_total": round(order_total, 2),
-            "points_redeemed": pts_redeemed,
-            "points_discount": round(pts_discount, 2),
             "tier": tier,
             "tier_discount_amount": round(tier_disc, 2),
-            "final_total": round(final, 2),
-            "total_savings": round(pts_discount + tier_disc, 2),
-            "points_earned": int(final * 1),
-            "remaining_points": loyalty_points - pts_redeemed + int(final * 1)
+            "final_total": round(final, 2)
         })
 
 
@@ -338,38 +332,38 @@ async def invoke(payload: dict, context=None) -> dict:
         browser_tool.browser,
     ]
 
-    # Connect to Gateway and run agent INSIDE the active client context manager
-    try:
-        client = MCPClient(
-            lambda: streamable_http_client(url=GATEWAY_URL)
-        )
-        with client:
-            gateway_tools = client.list_tools_sync()
-            logger.info("Discovered %d tools from Gateway", len(gateway_tools))
-            tools.extend(gateway_tools)
+    client = MCPClient(
+        lambda: streamable_http_client(url=GATEWAY_URL)
+    )
 
-            agent = Agent(
-                model=model,
-                tools=tools,
-                system_prompt=SYSTEM_PROMPT,
-                state={"session_id": session_id, "actor_id": actor_id},
-                hooks=[memory_hook],
+    # 1. Open the gateway client context once
+    with client as gateway_client:
+        try:
+            gateway_tools = gateway_client.list_tools_sync()
+            tools.extend(gateway_tools)
+            logger.info(
+                "Gateway connected successfully. Loaded %d tools.",
+                len(gateway_tools),
+            )
+        except TimeoutError:
+            logger.exception("Gateway tool loading timed out")
+        except ConnectionError:
+            logger.exception("Gateway connection failed")
+        except Exception as exc:
+            logger.exception(
+                "Gateway tool loading failed: %s", exc
             )
 
-            response = agent(user_message)
-            return response
-
-    except Exception as e:
-        logger.warning(f"Gateway connection failed, running without gateway tools: {e}")
+        # 2. Initialize and run the agent ONCE right here inside the active session
         agent = Agent(
             model=model,
-            tools=[search_knowledge_base, calculate_loyalty_discount, browser_tool.browser],
+            tools=tools,
             system_prompt=SYSTEM_PROMPT,
             state={"session_id": session_id, "actor_id": actor_id},
             hooks=[memory_hook],
         )
-        response = agent(user_message)
-        return response
+
+        return agent(user_message)
 
 
 if __name__ == "__main__":
